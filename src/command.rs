@@ -169,7 +169,8 @@ pub fn execute_command(command: &str, context: &CommandContext) -> Result<String
         );
     }
 
-    Ok(stdout_output)
+    // Trim trailing newline from stdout output
+    Ok(stdout_output.trim_end().to_string())
 }
 
 /// Context for command execution

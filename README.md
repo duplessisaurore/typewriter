@@ -113,6 +113,7 @@ file="a.file"
 
 # This is the location of which the source file will overwrite
 # Typewriter does *not* create files if they do not already exist.
+# unless the file_permission_strategy is set to the create strategy.
 destination="~/.config/program/a.file"
 
 # Another file to be managed.
@@ -176,7 +177,7 @@ confirm_shell_commands = false
 
 ### Variables
 
-Want to insert data from your central configuration into different configuration files? The ``variables`` feature of typewriter enables this. By default variables are referenced in configuration files by ``$TYPEWRITER{<variable_name>}`` but this can be customised.
+Want to insert data from your central configuration into different configuration files? The ``variables`` feature of typewriter enables this. By default variables are referenced in configuration files by ``$TYPEWRITER{<variable_name>}`` but this can be customised. Command variables have their trailing whitespace removed.
 
 ```toml
 # Variables example
@@ -658,7 +659,7 @@ file="other_dir/other_typewriter_config.toml"
 
 ### Variables
 
-These add individual "variables" (strings) that replace certain patterns supplied by ``variable_format`` in the configuration files managed by typewriter, each variable can be added under the array table ``[[var]]``.
+These add individual "variables" (strings) that replace certain patterns supplied by ``variable_format`` in the configuration files managed by typewriter, each variable can be added under the array table ``[[var]]``. 
 
 #### Aliases
 The ``[[var]]`` tables can also be defined under the aliases ``[[variable]]`` and ``[[define]]``.
@@ -689,7 +690,7 @@ type: ``string``
 
 ``literal``: Directly insert the value as a string in all references to the variable.
 
-``command``: Execute the value as a command in the shell defined in ``[config.commands]`` before preprocessing occurs for all files, and inserts its output in the references to the variable.
+``command``: Execute the value as a command in the shell defined in ``[config.commands]`` before preprocessing occurs for all files, and inserts its output in the references to the variable with their trailing whitespace removed. if whitespace is needed insert it into the referenced files instead.
 
 ``environment``: Read in the value as an environment variable and insert the environment variables value in all references to the variable.
 
