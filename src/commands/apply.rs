@@ -66,11 +66,18 @@ pub fn apply_command(file: String, section: String) -> anyhow::Result<()> {
         bail!("Aborting apply operation");
     }
 
+    // Create checkdiff strategy wrapper for variable strategy passing since its needed by the checkdiff to
+    // prevent false positives when variables are in use since files will contain variable markers not their value.
+    let checkdiff_strategy = crate::apply::checkdiff::FileCheckDiffStrategyWrapper::new(
+       config.apply.checkdiff_strategy,
+        &var_strategy,
+    );
+
     // ensure order is correct or bad things will happen !!
     let strategies: Vec<&dyn ApplyStrategy> = vec![
         &config.apply.file_permission_strategy,
         &var_strategy,
-        &config.apply.checkdiff_strategy,
+        &checkdiff_strategy,
         &config.apply.temp_copy_strategy,
         &hook_strategy,
     ];

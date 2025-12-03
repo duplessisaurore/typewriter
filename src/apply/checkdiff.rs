@@ -5,7 +5,7 @@
 use std::{
     collections::HashMap,
     fs::{self, File},
-    io::{BufReader, Read},
+    io::{BufRead, BufReader},
     path::PathBuf,
 };
 
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3::Xxh3;
 
 use crate::{
-    apply::strategy::ApplyStrategy,
+    apply::{strategy::ApplyStrategy, variables::VariableApplying},
     cleanpath::CleanPath,
     config::ROOT_CONFIG,
     file::{TrackedFile, TrackedFileList},
@@ -26,7 +26,7 @@ use crate::{
 /// This stage will prompt the user whether or not
 /// to continue with the apply if the files are found to
 /// be different.
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
 pub enum FileCheckDiffStrategy {
     // Checks by using XXHash for diff
     #[serde(rename = "xxhash")]
@@ -102,25 +102,39 @@ impl FileCheckDiffStrategy {
 }
 
 /// Hash function that should take a file path and return its hash as a string
-type HashFile = fn(file_path: &PathBuf) -> anyhow::Result<String>;
+type HashFile = fn(variable_strategy: &VariableApplying, file_path: &PathBuf) -> anyhow::Result<String>;
 
 /// XXHASH version of hashing a file in from file path
 
-fn xxhash_hash_file(path: &PathBuf) -> anyhow::Result<String> {
+fn xxhash_hash_file(variable_strategy: &VariableApplying, path: &PathBuf) -> anyhow::Result<String> {
     let file = File::open(path).with_context(|| format!("While trying to hash file {:?}", path))?;
+    
+    // We need to consider variables too in this case since
+    // we dont want to constantly re-apply files that have variables
+    // so we do a similar process for variable handling
     let mut reader = BufReader::new(file);
 
     // Buffer 64kb reads in from file at a time for hashing
     let mut hasher = Xxh3::new();
-    let mut buffer = [0u8; 65536];
 
+    // Buffer for current line read
+    let mut line = String::new();
+
+    // Process line by line, we don't use reader.lines to avoid
+    // stripping newlines
     loop {
-        // Update hash.
-        let bytes_read = reader.read(&mut buffer)?;
-        if bytes_read == 0 {
+        line.clear();
+        let num_bytes = reader.read_line(&mut line)
+            .with_context(|| format!("While reading from file {:?} to hash from", path))?;
+
+        // EOF
+        if num_bytes == 0 {
             break;
         }
-        hasher.update(&buffer[..bytes_read]);
+
+        // Replace all variables in this line
+        let replaced_line = variable_strategy.apply_variables_to_line(&line)?;
+        hasher.update(replaced_line.as_bytes());
     }
 
     Ok(format!("{}", hasher.digest()))
@@ -131,6 +145,7 @@ fn xxhash_hash_file(path: &PathBuf) -> anyhow::Result<String> {
 /// or not based on file-specific cases, on Err then
 /// client wishes to abort operation.
 fn hash_check_diff(
+    variable_strategy: &VariableApplying,
     checksum_entries: &ChecksumEntries,
     file: &TrackedFile,
     hash_fn: HashFile,
@@ -164,7 +179,7 @@ fn hash_check_diff(
     let expected_hash = checksum_entries.entries.get(&file.destination).unwrap();
 
     // Hash file
-    let hash_result = hash_fn(&file.destination)?;
+    let hash_result = hash_fn(variable_strategy, &file.destination)?;
 
     // Same hash, no diff
     if hash_result == *expected_hash {
@@ -192,14 +207,14 @@ fn hash_check_diff(
 /// Checks if two files are the same under checkdiff hash
 /// and skips if they are guaranteed to be the same, else
 /// doesn't
-fn hash_files_are_same(files: &TrackedFile, hash_fn: HashFile) -> bool {
+fn hash_files_are_same(variable_strategy: &VariableApplying, files: &TrackedFile, hash_fn: HashFile) -> bool {
     if !files.skip_if_same_content {
         return false;
     }
 
     // Run hash on source, destination and return if it is equal
-    if let Ok(hash_result_a) = hash_fn(&files.file) {
-        if let Ok(hash_result_b) = hash_fn(&files.destination) {
+    if let Ok(hash_result_a) = hash_fn(variable_strategy, &files.file) {
+        if let Ok(hash_result_b) = hash_fn(variable_strategy, &files.destination) {
             return hash_result_a == hash_result_b;
         }
     }
@@ -211,6 +226,7 @@ fn hash_files_are_same(files: &TrackedFile, hash_fn: HashFile) -> bool {
 /// (before copy) phase, checking
 /// if the hashes match or have changed.
 fn run_hash_strategy_before_copy(
+    variable_strategy: &VariableApplying,
     files: &mut TrackedFileList,
     hash_fn: HashFile,
 ) -> anyhow::Result<()> {
@@ -237,7 +253,7 @@ fn run_hash_strategy_before_copy(
 
     // Check diff of every file.
     for file in &files.0 {
-        hash_check_diff(&checksum_entries, file, hash_fn)?;
+        hash_check_diff(variable_strategy, &checksum_entries, file, hash_fn)?;
     }
 
     // Check for checkdiff skip things
@@ -250,7 +266,7 @@ fn run_hash_strategy_before_copy(
     // Filter files now
     files.retain(|file| {
         // Check for same and log if it is.
-        let is_same = hash_files_are_same(file, hash_fn);
+        let is_same = hash_files_are_same(variable_strategy, file, hash_fn);
 
         if is_same {
             info!("Dropping file {:?} that would apply to to {:?} referenced by config {:?} since content is the same.",
@@ -267,7 +283,7 @@ fn run_hash_strategy_before_copy(
 /// Saves all the files into the checkdiff
 /// file using hash_fn to produce a hash
 /// for future use for diff checking
-fn run_hash_strategy_after_copy(files: &TrackedFileList, hash_fn: HashFile) -> anyhow::Result<()> {
+fn run_hash_strategy_after_copy(variable_strategy: &VariableApplying, files: &TrackedFileList, hash_fn: HashFile) -> anyhow::Result<()> {
     // Use checksum storage file that already exists
     // to keep entries we may have lost
     let mut checksum_entries = FileCheckDiffStrategy::read_checksum_entries()?;
@@ -276,7 +292,7 @@ fn run_hash_strategy_after_copy(files: &TrackedFileList, hash_fn: HashFile) -> a
         // Insert with the new hash..
         checksum_entries.entries.insert(
             PathBuf::from(&file.destination),
-            hash_fn(&file.destination)?,
+            hash_fn(variable_strategy,&file.destination)?,
         );
     }
 
@@ -286,23 +302,43 @@ fn run_hash_strategy_after_copy(files: &TrackedFileList, hash_fn: HashFile) -> a
     Ok(())
 }
 
-impl ApplyStrategy for FileCheckDiffStrategy {
+pub struct FileCheckDiffStrategyWrapper<'a> {
+    // Strategy to use for file checkdiff
+    pub strategy: FileCheckDiffStrategy,
+
+    // Variable applying strategy to use for variable handling
+    pub variable_strategy:  &'a VariableApplying,
+}
+
+impl<'a> FileCheckDiffStrategyWrapper<'a> {
+    pub fn new(
+        strategy: FileCheckDiffStrategy,
+        variable_strategy: &'a VariableApplying,
+    ) -> Self {
+        Self {
+            strategy,
+            variable_strategy,
+        }
+    }
+}
+
+impl ApplyStrategy for FileCheckDiffStrategyWrapper<'_> {
     fn run_before_apply(self: &Self, files: &mut TrackedFileList) -> anyhow::Result<()> {
         // Specific method for checking file diff.
-        match self {
+        match self.strategy {
             FileCheckDiffStrategy::Disabled => Ok(()),
             FileCheckDiffStrategy::XXHashDiff => {
-                run_hash_strategy_before_copy(files, xxhash_hash_file)
+                run_hash_strategy_before_copy(self.variable_strategy, files, xxhash_hash_file)
             }
         }
     }
 
     fn run_after_apply(self: &Self, files: &mut TrackedFileList) -> anyhow::Result<()> {
         // Method for writing checksum back after copying
-        match self {
+        match self.strategy {
             FileCheckDiffStrategy::Disabled => Ok(()),
             FileCheckDiffStrategy::XXHashDiff => {
-                run_hash_strategy_after_copy(files, xxhash_hash_file)
+                run_hash_strategy_after_copy(self.variable_strategy, files, xxhash_hash_file)
             }
         }
     }

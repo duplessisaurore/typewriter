@@ -2,9 +2,7 @@
 //! typewriter variables in them.
 
 use std::{
-    collections::HashMap,
-    fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    borrow::Cow, collections::HashMap, fs::{self, File, OpenOptions}, io::{BufRead, BufReader, Write}
 };
 
 use anyhow::{Context, bail};
@@ -19,7 +17,7 @@ use crate::{
 
 /// Which strategy to use for the variable preprocessing
 /// stage?
-#[derive(Deserialize, Debug, Clone, Copy)]
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VariableApplyingStrategy {
     // Enabled, will preprocess and replace variables
     // found in file
@@ -65,6 +63,26 @@ fn get_variable_format_regex() -> anyhow::Result<Regex> {
 }
 
 impl VariableApplying {
+    // Apply variable map to a line
+    pub fn apply_variables_to_line<'a>(self: &Self, line: &'a str) -> anyhow::Result<Cow<'a, str>> {
+        if self.strategy == VariableApplyingStrategy::Disabled {
+            return Ok(Cow::Borrowed(line));
+        }
+
+        // Regex for variable matching
+        let variable_regex = get_variable_format_regex()?;
+
+        // Replace all variables in this line
+        let replaced_line = variable_regex.replace_all(line, |caps: &regex::Captures| {
+            let var_name = &caps[1];
+            // We already validated all variables exist in check_file_variables_valid
+            // so we can safely unwrap here unless some TOCTOU thing happened
+            self.var_map.get(var_name).unwrap().as_str()
+        });
+
+        Ok(replaced_line)
+    }
+
     /// Checks the passed in files content
     /// contains only valid variables in the variable
     /// format supplied, else errors.
@@ -130,9 +148,6 @@ impl VariableApplying {
 
         let mut reader = BufReader::new(open_file);
 
-        // Regex for variable matching
-        let variable_regex = get_variable_format_regex()?;
-
         // Buffer for current line read
         let mut line = String::new();
 
@@ -149,12 +164,7 @@ impl VariableApplying {
             }
 
             // Replace all variables in this line
-            let replaced_line = variable_regex.replace_all(&line, |caps: &regex::Captures| {
-                let var_name = &caps[1];
-                // We already validated all variables exist in check_file_variables_valid
-                // so we can safely unwrap here unless some TOCTOU thing happened
-                self.var_map.get(var_name).unwrap().as_str()
-            });
+            let replaced_line = self.apply_variables_to_line(&line)?;
 
             // Write the replaced line
             write!(destination_file, "{}", replaced_line)?;
