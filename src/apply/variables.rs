@@ -128,14 +128,25 @@ impl VariableApplying {
                 )
             })?;
 
-        let reader = BufReader::new(open_file);
+        let mut reader = BufReader::new(open_file);
 
         // Regex for variable matching
         let variable_regex = get_variable_format_regex()?;
 
-        // Process line by line
-        for line in reader.lines() {
-            let line = line?;
+        // Buffer for current line read
+        let mut line = String::new();
+
+        // Process line by line, we don't use reader.lines to avoid
+        // stripping newlines
+        loop {
+            line.clear();
+            let num_bytes = reader.read_line(&mut line)
+                .with_context(|| format!("While reading from file {:?} to replace variables", file.file))?;
+
+            // EOF
+            if num_bytes == 0 {
+                break;
+            }
 
             // Replace all variables in this line
             let replaced_line = variable_regex.replace_all(&line, |caps: &regex::Captures| {
@@ -145,8 +156,8 @@ impl VariableApplying {
                 self.var_map.get(var_name).unwrap().as_str()
             });
 
-            // Write the replaced line to temp file
-            writeln!(destination_file, "{}", replaced_line)?;
+            // Write the replaced line
+            write!(destination_file, "{}", replaced_line)?;
         }
 
         Ok(())
